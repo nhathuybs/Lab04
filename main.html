@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POI Finder VN – 5 địa điểm gần nhất</title>
+  <!-- Tailwind (CDN) for quick styling) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Leaflet CSS/JS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <style>
+    #map { height: 70vh; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <header class="max-w-5xl mx-auto p-4">
+    <h1 class="text-2xl md:text-3xl font-bold">POI Finder VN</h1>
+    <p class="text-sm text-slate-600">Nhập tên một địa điểm ở Việt Nam → Bản đồ sẽ hiển thị <strong>5 điểm quan tâm (POI)</strong> gần nhất.</p>
+  </header>
+
+  <main class="max-w-5xl mx-auto p-4 space-y-4">
+    <!-- Search Form -->
+    <div class="bg-white rounded-2xl shadow p-4 md:p-6 flex flex-col gap-3">
+      <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+        <div class="md:col-span-4">
+          <label for="place" class="text-sm font-medium">Địa điểm (ví dụ: "Hồ Gươm, Hà Nội" / "Quận 1, TP.HCM")</label>
+          <input id="place" type="text" class="mt-1 w-full rounded-xl border border-slate-200 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Nhập tên địa điểm..." />
+        </div>
+        <div class="md:col-span-1">
+          <label for="radius" class="text-sm font-medium">Bán kính (m)</label>
+          <select id="radius" class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="800">800</option>
+            <option value="1200" selected>1200</option>
+            <option value="1600">1600</option>
+            <option value="2000">2000</option>
+          </select>
+        </div>
+        <div class="md:col-span-1 flex gap-2">
+          <button id="searchBtn" class="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 font-semibold">Tìm</button>
+        </div>
+      </div>
+      <p id="status" class="text-sm text-slate-500"></p>
+    </div>
+
+    <!-- Map -->
+    <div id="map" class="rounded-2xl shadow"></div>
+
+    <!-- Results -->
+    <div class="bg-white rounded-2xl shadow p-4">
+      <h2 class="font-bold mb-2">5 POI gần nhất</h2>
+      <ol id="poiList" class="list-decimal pl-6 space-y-1 text-sm"></ol>
+    </div>
+
+    <p class="text-xs text-slate-400">Dữ liệu: © OpenStreetMap contributors (Nominatim, Overpass). Ứng dụng dùng cho mục đích demo/giáo dục.</p>
+  </main>
+
+  <script>
+    // --- Utility: Haversine distance (m) ---
+    function haversine(lat1, lon1, lat2, lon2) {
+      const toRad = (d) => (d * Math.PI) / 180;
+      const R = 6371000; // Earth radius (m)
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    // --- Leaflet map init ---
+    const map = L.map('map').setView([16.047, 108.206], 5); // VN view
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    let originMarker;  // marker for geocoded place
+    let poiLayer = L.layerGroup().addTo(map);
+
+    const statusEl = document.getElementById('status');
+    const listEl = document.getElementById('poiList');
+    const searchBtn = document.getElementById('searchBtn');
+
+    async function geocode(place) {
+      const url = new URL('https://nominatim.openstreetmap.org/search');
+      url.searchParams.set('q', place);
+      url.searchParams.set('format', 'json');
+      url.searchParams.set('addressdetails', '1');
+      url.searchParams.set('limit', '1');
+      url.searchParams.set('countrycodes', 'vn');
+      url.searchParams.set('accept-language', 'vi');
+      // Nominatim etiquette: include an identifying header via Referer (browser will add) and parameter 'namedetails' optional
+      const res = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) throw new Error('Geocoding lỗi: ' + res.status);
+      const data = await res.json();
+      return data && data.length ? data[0] : null;
+    }
+
+    async function fetchPOIs(lat, lon, radius) {
+      // Overpass QL: tìm các node thuộc nhóm amenity / tourism / shop trong bán kính
+      const query = `
+        [out:json][timeout:25];
+        (
+          node(around:${radius}, ${lat}, ${lon})[amenity];
+          node(around:${radius}, ${lat}, ${lon})[tourism];
+          node(around:${radius}, ${lat}, ${lon})[shop];
+        );
+        out center 100;
+      `;
+      const url = 'https://overpass-api.de/api/interpreter';
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ data: query })
+      });
+      if (!res.ok) throw new Error('Overpass lỗi: ' + res.status);
+      const json = await res.json();
+      return (json.elements || []).filter(e => e.type === 'node');
+    }
+
+    function renderPOIs(origin, nodes) {
+      // Tính khoảng cách, sắp xếp, lấy 5 gần nhất
+      const enriched = nodes.map(n => {
+        const dist = haversine(origin.lat, origin.lon, n.lat, n.lon);
+        return { ...n, distance: dist };
+      }).sort((a, b) => a.distance - b.distance).slice(0, 5);
+
+      // Xóa lớp cũ
+      poiLayer.clearLayers();
+      listEl.innerHTML = '';
+
+      // Marker gốc
+      if (originMarker) originMarker.remove();
+      originMarker = L.marker([origin.lat, origin.lon], { title: origin.display_name })
+        .addTo(map).bindPopup(`<b>Địa điểm:</b><br>${origin.display_name}`);
+
+      // Fit bounds với tất cả điểm
+      const bounds = L.latLngBounds([[origin.lat, origin.lon]]);
+
+      // Thêm POI markers
+      enriched.forEach((e, idx) => {
+        const name = e.tags && (e.tags.name || e.tags['name:vi'] || e.tags['name:en']);
+        const type = e.tags && (e.tags.amenity || e.tags.tourism || (e.tags.shop ? 'shop' : 'poi'));
+        const label = name || `(POI #${idx + 1})`;
+        const distText = (e.distance/1000).toFixed(2) + ' km';
+
+        const m = L.marker([e.lat, e.lon]).bindPopup(
+          `<b>${label}</b><br/>Loại: ${type || '—'}<br/>Khoảng cách: ${distText}`
+        );
+        poiLayer.addLayer(m);
+        bounds.extend([e.lat, e.lon]);
+
+        const li = document.createElement('li');
+        li.className = 'leading-snug';
+        li.innerHTML = `<span class="font-medium">${label}</span> <span class="text-slate-500">(${type || 'POI'}, ${distText})</span>`;
+        li.addEventListener('click', () => {
+          m.openPopup();
+          map.panTo([e.lat, e.lon]);
+        });
+        listEl.appendChild(li);
+      });
+
+      // Zoom để nhìn hết
+      if (enriched.length) {
+        map.fitBounds(bounds.pad(0.2));
+      } else {
+        map.setView([origin.lat, origin.lon], 15);
+      }
+    }
+
+    async function handleSearch() {
+      const place = document.getElementById('place').value.trim();
+      const radius = parseInt(document.getElementById('radius').value, 10) || 1200;
+      if (!place) {
+        alert('Vui lòng nhập tên địa điểm ở Việt Nam.');
+        return;
+      }
+      statusEl.textContent = 'Đang tìm tọa độ...';
+      try {
+        const geo = await geocode(place);
+        if (!geo) {
+          statusEl.textContent = 'Không tìm thấy địa điểm. Hãy thử cụ thể hơn (ví dụ: "Chợ Bến Thành, Quận 1, TP.HCM").';
+          return;
+        }
+        const lat = parseFloat(geo.lat), lon = parseFloat(geo.lon);
+        statusEl.textContent = `Đã định vị: ${geo.display_name}. Đang tìm POI trong bán kính ${radius}m...`;
+
+        // di chuyển map về điểm gốc
+        map.setView([lat, lon], 15);
+
+        const pois = await fetchPOIs(lat, lon, radius);
+        renderPOIs({ lat, lon, display_name: geo.display_name }, pois);
+        statusEl.textContent = `Hoàn tất. Hiển thị 5 POI gần nhất.`;
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Có lỗi xảy ra. Vui lòng thử lại sau.';
+      }
+    }
+
+    searchBtn.addEventListener('click', handleSearch);
+    document.getElementById('place').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleSearch();
+    });
+  </script>
+</body>
+</html>
