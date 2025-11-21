@@ -66,119 +66,70 @@
 
   <script>
     // --- Utility: Haversine distance (m) ---
-    function haversine(lat1, lon1, lat2, lon2) {
-      const toRad = (d) => (d * Math.PI) / 180;
-      const R = 6371000; // Earth radius (m)
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return R * c;
-    }
+    function haversine(lat1, lon1, lat2, lon2) { /* ... giữ nguyên ... */ }
 
     // --- Leaflet map init ---
-    const map = L.map('map').setView([16.047, 108.206], 5); // VN view
+    const map = L.map('map').setView([16.047, 108.206], 5);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
-    let originMarker;  // marker for geocoded place
+    let originMarker;
     let poiLayer = L.layerGroup().addTo(map);
 
     const statusEl = document.getElementById('status');
     const listEl = document.getElementById('poiList');
     const searchBtn = document.getElementById('searchBtn');
 
-    async function geocode(place) {
-      const url = new URL('https://nominatim.openstreetmap.org/search');
-      url.searchParams.set('q', place);
-      url.searchParams.set('format', 'json');
-      url.searchParams.set('addressdetails', '1');
-      url.searchParams.set('limit', '1');
-      url.searchParams.set('countrycodes', 'vn');
-      url.searchParams.set('accept-language', 'vi');
-      // Nominatim etiquette: include an identifying header via Referer (browser will add) and parameter 'namedetails' optional
-      const res = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
-      if (!res.ok) throw new Error('Geocoding lỗi: ' + res.status);
-      const data = await res.json();
-      return data && data.length ? data[0] : null;
+    // --- WEATHER FUNCTIONS ---
+    async function fetchWeather(lat, lon) {
+      const apiKey = "43b9608ffa211408507384378f0f374d"; // 🔑 thay bằng key thật
+      const url = `https://api.allorigins.win/raw?url=${encodeURIComponent(
+  `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric&lang=vi`
+)}`;
+git add index.html
+git commit -m "Fix CORS for OpenWeather"
+git push
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Lỗi khi lấy dữ liệu thời tiết');
+      return res.json();
     }
 
-    async function fetchPOIs(lat, lon, radius) {
-      // Overpass QL: tìm các node thuộc nhóm amenity / tourism / shop trong bán kính
-      const query = `
-        [out:json][timeout:25];
-        (
-          node(around:${radius}, ${lat}, ${lon})[amenity];
-          node(around:${radius}, ${lat}, ${lon})[tourism];
-          node(around:${radius}, ${lat}, ${lon})[shop];
-        );
-        out center 100;
-      `;
-      const url = 'https://overpass-api.de/api/interpreter';
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams({ data: query })
-      });
-      if (!res.ok) throw new Error('Overpass lỗi: ' + res.status);
-      const json = await res.json();
-      return (json.elements || []).filter(e => e.type === 'node');
-    }
+    async function showWeather(lat, lon, placeName) {
+      try {
+        const w = await fetchWeather(lat, lon);
+        const desc = w.weather?.[0]?.description ?? "Không rõ";
+        const temp = w.main?.temp?.toFixed(1) ?? "?";
+        const feels = w.main?.feels_like?.toFixed(1) ?? "?";
+        const humid = w.main?.humidity ?? "?";
+        const icon = w.weather?.[0]?.icon;
+        const iconUrl = icon ? `https://openweathermap.org/img/wn/${icon}@2x.png` : "";
 
-    function renderPOIs(origin, nodes) {
-      // Tính khoảng cách, sắp xếp, lấy 5 gần nhất
-      const enriched = nodes.map(n => {
-        const dist = haversine(origin.lat, origin.lon, n.lat, n.lon);
-        return { ...n, distance: dist };
-      }).sort((a, b) => a.distance - b.distance).slice(0, 5);
+        const container = document.querySelector(".bg-white.rounded-2xl.shadow.p-4:last-of-type");
+        let weatherBox = document.getElementById("weatherBox");
+        if (!weatherBox) {
+          weatherBox = document.createElement("div");
+          weatherBox.id = "weatherBox";
+          weatherBox.className = "mt-4 bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-center gap-3";
+          container.parentNode.insertBefore(weatherBox, container.nextSibling);
+        }
 
-      // Xóa lớp cũ
-      poiLayer.clearLayers();
-      listEl.innerHTML = '';
-
-      // Marker gốc
-      if (originMarker) originMarker.remove();
-      originMarker = L.marker([origin.lat, origin.lon], { title: origin.display_name })
-        .addTo(map).bindPopup(`<b>Địa điểm:</b><br>${origin.display_name}`);
-
-      // Fit bounds với tất cả điểm
-      const bounds = L.latLngBounds([[origin.lat, origin.lon]]);
-
-      // Thêm POI markers
-      enriched.forEach((e, idx) => {
-        const name = e.tags && (e.tags.name || e.tags['name:vi'] || e.tags['name:en']);
-        const type = e.tags && (e.tags.amenity || e.tags.tourism || (e.tags.shop ? 'shop' : 'poi'));
-        const label = name || `(POI #${idx + 1})`;
-        const distText = (e.distance/1000).toFixed(2) + ' km';
-
-        const m = L.marker([e.lat, e.lon]).bindPopup(
-          `<b>${label}</b><br/>Loại: ${type || '—'}<br/>Khoảng cách: ${distText}`
-        );
-        poiLayer.addLayer(m);
-        bounds.extend([e.lat, e.lon]);
-
-        const li = document.createElement('li');
-        li.className = 'leading-snug';
-        li.innerHTML = `<span class="font-medium">${label}</span> <span class="text-slate-500">(${type || 'POI'}, ${distText})</span>`;
-        li.addEventListener('click', () => {
-          m.openPopup();
-          map.panTo([e.lat, e.lon]);
-        });
-        listEl.appendChild(li);
-      });
-
-      // Zoom để nhìn hết
-      if (enriched.length) {
-        map.fitBounds(bounds.pad(0.2));
-      } else {
-        map.setView([origin.lat, origin.lon], 15);
+        weatherBox.innerHTML = `
+          <img src="${iconUrl}" alt="icon" class="w-12 h-12">
+          <div>
+            <div class="font-medium text-blue-700">Thời tiết tại ${placeName}</div>
+            <div>Nhiệt độ: ${temp}°C (cảm giác: ${feels}°C)</div>
+            <div>Mô tả: ${desc}, Độ ẩm: ${humid}%</div>
+          </div>
+        `;
+      } catch (err) {
+        console.error(err);
       }
     }
+
+    // --- Các hàm geocode(), fetchPOIs(), renderPOIs() giữ nguyên ---
 
     async function handleSearch() {
       const place = document.getElementById('place').value.trim();
@@ -191,17 +142,16 @@
       try {
         const geo = await geocode(place);
         if (!geo) {
-          statusEl.textContent = 'Không tìm thấy địa điểm. Hãy thử cụ thể hơn (ví dụ: "Chợ Bến Thành, Quận 1, TP.HCM").';
+          statusEl.textContent = 'Không tìm thấy địa điểm.';
           return;
         }
         const lat = parseFloat(geo.lat), lon = parseFloat(geo.lon);
-        statusEl.textContent = `Đã định vị: ${geo.display_name}. Đang tìm POI trong bán kính ${radius}m...`;
+        statusEl.textContent = `Đã định vị: ${geo.display_name}. Đang tìm POI...`;
 
-        // di chuyển map về điểm gốc
         map.setView([lat, lon], 15);
-
         const pois = await fetchPOIs(lat, lon, radius);
         renderPOIs({ lat, lon, display_name: geo.display_name }, pois);
+        await showWeather(lat, lon, geo.display_name);
         statusEl.textContent = `Hoàn tất. Hiển thị 5 POI gần nhất.`;
       } catch (err) {
         console.error(err);
@@ -214,5 +164,6 @@
       if (e.key === 'Enter') handleSearch();
     });
   </script>
+
 </body>
 </html>
